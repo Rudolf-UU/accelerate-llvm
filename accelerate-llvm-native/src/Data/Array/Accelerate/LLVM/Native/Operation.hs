@@ -81,6 +81,13 @@ data NativeOp t where
                          -> Out (sh, Int) e -- the local scan result
                         --  -> Out (sh, Int) e -- the local fold result
                          -> ()) -- TODO: huh? Where would we make the two outputs differ? at evalOp they are the same, and i'm not sure writeOutput has a say in the matter
+
+  NScanl2      :: NativeOp (Fun' (e -> e -> e) 
+                         -> In (sh, Int) e 
+                         -> Out (sh, Int) e -- the local scan result
+                        --  -> Out (sh, Int) e -- the local fold result
+                         -> ()) -- TODO: huh? Where would we make the two outputs differ? at evalOp they are the same, and i'm not sure writeOutput has a say in the matter
+                         
   NFold1       :: NativeOp (Fun' (e -> e -> e) -- segmented, TODO: how to represent the output being 'one per thread on each row'?
                          -> In  ((), Int) e
                          -> Out ((), Int) e
@@ -96,6 +103,7 @@ instance PrettyOp NativeOp where
   prettyOp NGenerate    = "generate"
   prettyOp NPermute     = "permute"
   prettyOp NScanl1      = "scanl1"
+  prettyOp NScanl2      = "scanl2"
   prettyOp NFold1       = "fold-1"
   prettyOp NFold2       = "fold-2"
 
@@ -116,7 +124,10 @@ instance DesugarAcc NativeOp where
     -- = error "todo"
   -- right to left is conceptually easy once we already have order variables for backpermute. 
   -- Exclusive scans (changing array size) are weirder, require an extra 'cons' primitive
-  mkScan _ _ _ _ _ = error "todo" 
+ 
+  mkScan _ _ _ _ _ = error "todo: scan operation"
+  -- mkScan LeftToRight f _ b@(ArgArray In arr1@(ArrayR _ tp) _ _) c@(ArgArray Out arr2@(ArrayR _ tp2) _ _) = error ("todo: " ++ show arr1 )
+ 
   mkPermute     a b@(ArgArray _ (ArrayR shr _) sh _) c d
     | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord8
     = aletUnique lhs 

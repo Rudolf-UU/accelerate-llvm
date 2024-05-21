@@ -309,6 +309,7 @@ instance EvalOp NativeOp where
         pure (Push Env.Empty $ FromArg (Value' (CJ z) sh), M.adjust (const (Exists z, eTy)) l acc)
     | otherwise = pure $ Push Env.Empty $ FromArg (Value' CN sh)
   evalOp _ _ NScanl1 gamma (Push (Push _ (BAE (Value' x' sh) (BCAN2 (Just (BP{})) d))) (BAE f' _)) = error "backpermuted scan"
+  evalOp _ _ NScanl2 _ _ = error "multidim scan"
   evalOp i l NFold1 gamma args = error "todo: fold1"
   -- we can ignore the index permutation for folds here
   evalOp (d',_,ixs) l NFold2 gamma (Push (Push _ (BAE (Value' x' sh@(Shape' (ShapeRsnoc shr') (CJ (OP_Pair sh' _)))) (BCAN2 _ d))) (BAE f' _))
@@ -328,7 +329,7 @@ instance EvalOp NativeOp where
         let (Exists (unsafeCoerce @(Operands _) @(Operands e) -> x), _) = acc M.! l
         pure (Push Env.Empty $ FromArg (Value' (CJ x) (Shape' shr' (CJ sh'))), acc)
     | otherwise = pure $ Push Env.Empty $ FromArg (Value' CN (Shape' shr' (CJ sh')))
-  -- evalOp _ _ _ _ _ = error "unmatched pattern?"
+  evalOp _ _ _ _ _ = error "unmatched pattern?"
 
 multidim :: ShapeR sh -> [Operands Int] -> Operands sh
 multidim ShapeRz [] = OP_Unit
