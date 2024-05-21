@@ -1,6 +1,8 @@
 {-# LANGUAGE GADTs               #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications    #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.CodeGen.Native.Loop
@@ -19,7 +21,7 @@ module Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape                   hiding ( eq )
 
-import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
+import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A hiding (lift)
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
@@ -34,6 +36,11 @@ import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.Volatile
 import qualified LLVM.AST.Type.Instruction.RMW as RMW
+import Control.Monad.Trans
+import Control.Monad.State
+import Data.Array.Accelerate.LLVM.CodeGen.Base
+import LLVM.AST.Type.Function
+import LLVM.AST.Type.Name
 
 -- | A standard 'for' loop, that steps from the start to end index executing the
 -- given function at each index.
@@ -72,6 +79,35 @@ imapNestFromTo shr start end extent body =
       = go shr' ssh esh
       $ \sz      -> imapFromTo ssz esz
       $ \i       -> k (OP_Pair sz i)
+
+loopWorkFromTo :: ShapeR sh -> Operands sh -> Operands sh -> Operands sh -> TypeR s -> LoopWork sh (StateT (Operands s) (CodeGen Native)) -> StateT (Operands s) (CodeGen Native) ()
+loopWorkFromTo shr start end extent tys loopwork = do
+  linix <- lift (intOfIndex shr extent start)
+  loopWorkFromTo' shr start end extent linix [] tys loopwork
+
+loopWorkFromTo' :: ShapeR sh -> Operands sh -> Operands sh -> Operands sh -> Operands Int -> [Operands Int] -> TypeR s -> LoopWork sh (StateT (Operands s) (CodeGen Native)) -> StateT (Operands s) (CodeGen Native) ()
+loopWorkFromTo' ShapeRz OP_Unit OP_Unit OP_Unit _ _ _ LoopWorkZ = pure ()
+loopWorkFromTo' (ShapeRsnoc shr) (OP_Pair start' start) (OP_Pair end' end) (OP_Pair extent' _) linix ixs tys (LoopWorkSnoc lw foo) = do
+  StateT $ \s -> ((),) <$> Loop.iter
+    (TupRpair typerInt typerInt)
+    tys
+    (OP_Pair start linix)
+    s
+    (\(OP_Pair i _) -> lt singleType i end)
+    (\(OP_Pair i l) -> OP_Pair <$> add numType (constant typerInt 1) i <*> add numType (constant typerInt 1) l)
+    (\(OP_Pair i l) -> execStateT $ do
+                        recurlinix <- lift $ mul numType l $ firstOrZero shr extent'
+                        loopWorkFromTo' shr start' end' extent' recurlinix (i:ixs) tys lw
+                        foo l (i : ixs))
+
+                
+firstOrZero :: ShapeR sh -> Operands sh -> Operands Int
+firstOrZero ShapeRz _ = constant typerInt 0
+firstOrZero ShapeRsnoc{} (OP_Pair _ i) = i
+  
+
+typerInt :: TypeR Int
+typerInt = TupRsingle scalarTypeInt
 
 
 {--
@@ -169,128 +205,198 @@ workstealLoop
     :: Operand (Ptr Int32)                  -- index into work
     -> Operand (Ptr Int32)                  -- number of threads that are working
     -> Operand Int32                        -- size of total work
-    -> (Operand Int32 -> CodeGen Native ())
-    -> CodeGen Native ()
+    -> (Operand Int32 -> StateT (Operands s) (CodeGen Native) ())
+    -> StateT (Operands s) (CodeGen Native) ()
 workstealLoop counter activeThreads size doWork = do
-  start    <- newBlock "worksteal.start"
-  work     <- newBlock "worksteal.loop.work"
-  exit     <- newBlock "worksteal.exit"
-  exitLast <- newBlock "worksteal.exit.last"
-  finished <- newBlock "worksteal.finished"
+  start    <- lift $ newBlock "worksteal.start"
+  work     <- lift $ newBlock "worksteal.loop.work"
+  exit     <- lift $ newBlock "worksteal.exit"
+  exitLast <- lift $ newBlock "worksteal.exit.last"
+  finished <- lift $ newBlock "worksteal.finished"
 
   -- Check whether there might be work for us
-  initialCounter <- instr' $ Load scalarType NonVolatile counter
-  initialCondition <- lt singleType (OP_Int32 initialCounter) (OP_Int32 size)
-  cbr initialCondition start finished
+  initialCounter <- lift $ instr' $ Load scalarType NonVolatile counter
+  initialCondition <- lift $ lt singleType (OP_Int32 initialCounter) (OP_Int32 size)
+  lift $ cbr initialCondition start finished
 
-  setBlock start
+  lift $ setBlock start
   -- Might be work for us!
   -- First mark that this thread is doing work.
-  atomicAdd Acquire activeThreads (integral TypeInt32 1)
-  startIndex <- atomicAdd Unordered counter (integral TypeInt32 1)
-  startCondition <- lt singleType (OP_Int32 startIndex) (OP_Int32 size)
-  cbr startCondition work exit
+  lift $ atomicAdd Acquire activeThreads (integral TypeInt32 1)
+  startIndex <- lift $ atomicAdd Unordered counter (integral TypeInt32 1)
+  startCondition <- lift $ lt singleType (OP_Int32 startIndex) (OP_Int32 size)
+  lift $ cbr startCondition work exit
 
-  setBlock work
-  indexName <- freshLocalName
+  lift $ setBlock work
+  indexName <- lift $ freshLocalName
   let index = LocalReference type' indexName
 
   -- Already claim the next work, to hide the latency of the atomic instruction
-  nextIndex <- atomicAdd Unordered counter (integral TypeInt32 1)
+  nextIndex <- lift $ atomicAdd Unordered counter (integral TypeInt32 1)
 
   doWork index
-  condition <- lt singleType (OP_Int32 nextIndex) (OP_Int32 size)
+  condition <- lift $ lt singleType (OP_Int32 nextIndex) (OP_Int32 size)
 
   -- Append the phi node to the start of the 'work' block.
   -- We can only do this now, as we need to have 'nextIndex', and know the
   -- exit block of 'doWork'.
-  currentBlock <- getBlock
-  phi1 work indexName [(startIndex, start), (nextIndex, currentBlock)]
+  currentBlock <- lift $ getBlock
+  lift $ phi1 work indexName [(startIndex, start), (nextIndex, currentBlock)]
 
-  cbr condition work exit
+  lift $ cbr condition work exit
 
-  setBlock exit
+  lift $ setBlock exit
   -- Decrement activeThreads
-  remaining <- atomicAdd Release activeThreads (integral TypeInt32 (-1))
+  remaining <- lift $ atomicAdd Release activeThreads (integral TypeInt32 (-1))
   -- If 'activeThreads' was 1 (now 0), then all work is definitely done.
   -- Note that there may be multiple threads returning true here.
   -- It is guaranteed that at least one thread returns true.
-  allDone <- eq singleType (OP_Int32 remaining) (liftInt32 1)
-  cbr allDone exitLast finished
+  allDone <- lift $ eq singleType (OP_Int32 remaining) (liftInt32 1)
+  lift $ cbr allDone exitLast finished
 
-  setBlock exitLast
+  lift $ setBlock exitLast
   -- Use compare-and-set to change the active-threads counter to 1:
   --  * Out of all threads that currently see an active-thread count of 0, only
   --    1 will succeed the CAS.
   --  * Given that the counter is artifically increased here, no other thread
   --    will see the counter ever drop to 0.
   -- Hence we get a unique thread to continue the computation after this kernel.
-  casResult <- instr' $ CmpXchg TypeInt32 NonVolatile activeThreads (integral TypeInt32 0) (integral TypeInt32 1) (CrossThread, Monotonic) Monotonic
-  last <- instr' $ ExtractValue primType (TupleIdxRight TupleIdxSelf) casResult
-  retval_ last
+  casResult <- lift $ instr' $ CmpXchg TypeInt32 NonVolatile activeThreads (integral TypeInt32 0) (integral TypeInt32 1) (CrossThread, Monotonic) Monotonic
+  last <- lift $ instr' $ ExtractValue primType (TupleIdxRight TupleIdxSelf) casResult
+  lift $ retval_ last
 
-  setBlock finished
+  lift $ setBlock finished
   -- Work was already finished
-  retval_ $ boolean False
+  lift $ retval_ $ boolean False
 
-workstealChunked :: ShapeR sh -> Operand (Ptr Int32) -> Operand (Ptr Int32) -> Operands sh -> (Operands sh -> Operands Int -> CodeGen Native ()) -> CodeGen Native ()
-workstealChunked shr counter activeThreads sh doWork = do
-  let chunkSz = chunkSize shr
-  chunkCounts <- chunkCount shr sh chunkSz
-  chunkCnt <- shapeSize shr chunkCounts
-  chunkCnt' :: Operand Int32 <- instr' $ Trunc boundedType boundedType $ op TypeInt chunkCnt
+  -- lift $ setBlock dummy -- without this, the previous block always returns True for some reason
+  
 
+workstealChunked :: ShapeR sh -> Operand (Ptr Int32) -> Operand (Ptr Int32) -> Operands sh -> TypeR s -> LoopWork sh (StateT (Operands s) (CodeGen Native)) -> StateT (Operands s) (CodeGen Native) ()
+workstealChunked shr counter activeThreads sh tys loopwork = do
+  let chunkSz = chunkSize' shr sh
+  chunkCounts <- lift $ chunkCount shr sh chunkSz
+  chunkCnt <- lift $ shapeSize shr chunkCounts
+  chunkCnt' :: Operand Int32 <- lift $ instr' $ Trunc boundedType boundedType $ op TypeInt chunkCnt
   workstealLoop counter activeThreads chunkCnt' $ \chunkLinearIndex -> do
-    chunkLinearIndex' <- instr' $ Ext boundedType boundedType chunkLinearIndex
-    chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
-    start <- chunkStart shr chunkSz chunkIndex
-    end <- chunkEnd shr sh chunkSz start
+    chunkLinearIndex' <- lift $ instr' $ Ext boundedType boundedType chunkLinearIndex
+    chunkIndex <- lift $ indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
+    start <- lift $ chunkStart shr chunkSz chunkIndex
+    end <- lift $ chunkEnd shr sh chunkSz start
+    -- imapNestFromTo shr start end sh doWork
+    loopWorkFromTo shr start end sh tys loopwork
 
-    imapNestFromTo shr start end sh doWork
 
-chunkSize :: ShapeR sh -> sh
-chunkSize ShapeRz = ()
-chunkSize (ShapeRsnoc ShapeRz) = ((), 1024 * 16)
-chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 64), 64)
-chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc ShapeRz))) = ((((), 16), 16), 32)
-chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh)))) = ((((go sh, 8), 8), 16), 16)
-  where
-    go :: ShapeR sh' -> sh'
-    go ShapeRz = ()
-    go (ShapeRsnoc sh') = (go sh', 1)
 
-chunkCount :: ShapeR sh -> Operands sh -> sh -> CodeGen Native (Operands sh)
-chunkCount ShapeRz OP_Unit () = return OP_Unit
-chunkCount (ShapeRsnoc shr) (OP_Pair sh sz) (chunkSh, chunkSz) = do
+chunkSize' :: ShapeR sh -> Operands sh -> Operands sh
+chunkSize' ShapeRz OP_Unit = OP_Unit
+chunkSize' (ShapeRsnoc ShapeRz) (OP_Pair _ sz) = OP_Pair OP_Unit sz
+chunkSize' (ShapeRsnoc shr) (OP_Pair sh _) = OP_Pair (chunkSize' shr sh) (liftInt 1)
+-- chunkSize' (ShapeRsnoc shr) (OP_Pair _ sz) = OP_Pair (ones shr) sz 
+--   where
+--     ones :: ShapeR sh -> Operands sh
+--     ones ShapeRz = OP_Unit
+--     ones (ShapeRsnoc shr) = OP_Pair (ones shr) (liftInt 1)
+
+-- chunkSize :: ShapeR sh -> Operands sh
+-- chunkSize ShapeRz = OP_Unit
+-- chunkSize (ShapeRsnoc shr) = OP_Pair (chunkSize shr) (liftInt 1)
+-- chunkSize (ShapeRsnoc ShapeRz) = ((), 1024 * 16)
+-- chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 64), 64)
+-- chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc ShapeRz))) = ((((), 16), 16), 32)
+-- chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh)))) = ((((go sh, 8), 8), 16), 16)
+  -- where
+  --   go :: ShapeR sh' -> sh'
+  --   go ShapeRz = ()
+  --   go (ShapeRsnoc sh') = (go sh', 1)
+
+chunkCount :: ShapeR sh -> Operands sh -> Operands sh -> CodeGen Native (Operands sh)
+chunkCount ShapeRz OP_Unit OP_Unit = return OP_Unit
+chunkCount (ShapeRsnoc shr) (OP_Pair sh sz) (OP_Pair chunkSh chunkSz) = do
   counts <- chunkCount shr sh chunkSh
   
   -- Compute ceil(sz / chunkSz), as
   -- (sz + chunkSz - 1) `quot` chunkSz
-  sz' <- add numType sz (liftInt $ chunkSz - 1)
-  count <- A.quot TypeInt sz' $ liftInt chunkSz
+  chunkszsub1 <- sub numType chunkSz $ constant typerInt 1
+  sz' <- add numType sz chunkszsub1
+  count <- A.quot TypeInt sz' chunkSz
 
   return $ OP_Pair counts count
 
-chunkStart :: ShapeR sh -> sh -> Operands sh -> CodeGen Native (Operands sh)
-chunkStart ShapeRz () OP_Unit = return OP_Unit
-chunkStart (ShapeRsnoc shr) (chunkSh, chunkSz) (OP_Pair sh sz) = do
+-- chunkSize :: ShapeR sh -> sh
+-- chunkSize ShapeRz = ()
+-- chunkSize (ShapeRsnoc ShapeRz) = ((), 1024 * 16)
+-- chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 64), 64)
+-- chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc ShapeRz))) = ((((), 16), 16), 32)
+-- chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh)))) = ((((go sh, 8), 8), 16), 16)
+--   where
+--     go :: ShapeR sh' -> sh'
+--     go ShapeRz = ()
+--     go (ShapeRsnoc sh') = (go sh', 1)
+
+-- chunkCount :: ShapeR sh -> Operands sh -> sh -> CodeGen Native (Operands sh)
+-- chunkCount ShapeRz OP_Unit () = return OP_Unit
+-- chunkCount (ShapeRsnoc shr) (OP_Pair sh sz) (chunkSh, chunkSz) = do
+--   counts <- chunkCount shr sh chunkSh
+  
+--   -- Compute ceil(sz / chunkSz), as
+--   -- (sz + chunkSz - 1) `quot` chunkSz
+--   sz' <- add numType sz (liftInt $ chunkSz - 1)
+--   count <- A.quot TypeInt sz' $ liftInt chunkSz
+
+--   return $ OP_Pair counts count
+
+chunkStart :: ShapeR sh -> Operands sh -> Operands sh -> CodeGen Native (Operands sh)
+chunkStart ShapeRz OP_Unit OP_Unit = return OP_Unit
+chunkStart (ShapeRsnoc shr) (OP_Pair chunkSh chunkSz) (OP_Pair sh sz) = do
   ixs <- chunkStart shr chunkSh sh
-  ix <- mul numType sz $ liftInt chunkSz
+  ix <- mul numType sz chunkSz
   return $ OP_Pair ixs ix
 
 chunkEnd
   :: ShapeR sh
-  -> Operands sh -- Array sizee
-  -> sh          -- Chunk size
+  -> Operands sh -- Array size (extent)
+  -> Operands sh -- Chunk size
   -> Operands sh -- Chunk start
   -> CodeGen Native (Operands sh) -- Chunk end
-chunkEnd ShapeRz OP_Unit () OP_Unit = return OP_Unit
-chunkEnd (ShapeRsnoc shr) (OP_Pair sh0 sz0) (sh1, sz1) (OP_Pair sh2 sz2) = do
-  sh3 <- chunkStart shr sh1 sh2
-  sz3 <- add numType sz2 $ liftInt sz1
+chunkEnd ShapeRz OP_Unit OP_Unit OP_Unit = return OP_Unit
+chunkEnd (ShapeRsnoc shr) (OP_Pair sh0 sz0) (OP_Pair sh1 sz1) (OP_Pair sh2 sz2) = do
+  sh3 <- chunkEnd shr sh0 sh1 sh2
+  sz3 <- add numType sz2 sz1
   sz3' <- A.min singleType sz3 sz0
   return $ OP_Pair sh3 sz3'
 
 atomicAdd :: MemoryOrdering -> Operand (Ptr Int32) -> Operand Int32 -> CodeGen Native (Operand Int32)
 atomicAdd ordering ptr increment = do
   instr' $ AtomicRMW numType NonVolatile RMW.Add ptr increment (CrossThread, ordering)
+
+
+data LoopWork sh m where
+  LoopWorkZ :: LoopWork () m
+  LoopWorkSnoc :: LoopWork sh m
+               -- The list contains only indices available, i.e. not the ones in even deeper nesting
+               -> (Operands Int -> [Operands Int] -> m ())
+               -> LoopWork (sh, Int) m
+
+
+
+---- debugging tools ----
+putchar :: Operands Int -> CodeGen Native (Operands Int)
+putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "putchar")) 
+                 (ArgumentsCons (op TypeInt x) [] ArgumentsNil) 
+                 []
+putcharA, putcharB, putcharC, putcharD, putcharE, putcharF, putcharG, putcharH :: StateT s (CodeGen Native) ()
+putcharA = void $ lift $ putchar $ liftInt 65
+putcharB = void $ lift $ putchar $ liftInt 66
+putcharC = void $ lift $ putchar $ liftInt 67
+putcharD = void $ lift $ putchar $ liftInt 68
+putcharE = void $ lift $ putchar $ liftInt 69
+putcharF = void $ lift $ putchar $ liftInt 70
+putcharG = void $ lift $ putchar $ liftInt 71
+putcharH = void $ lift $ putchar $ liftInt 72
+
+printShape :: ShapeR sh -> Operands sh -> CodeGen Native ()
+printShape ShapeRz _ = void $ putchar $ liftInt $ 65+25
+printShape (ShapeRsnoc shr) (OP_Pair sh sz) = do
+  putchar =<< add numType (liftInt 48) sz
+  printShape shr sh

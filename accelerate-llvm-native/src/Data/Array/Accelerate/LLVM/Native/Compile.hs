@@ -92,6 +92,7 @@ compile uid name module' = do
         withModuleFromAST ctx ast    $ \mdl     ->
         withNativeTargetMachine      $ \machine ->
         withTargetLibraryInfo triple $ \libinfo -> do
+          -- dump llvm
           -- hPutStrLn stderr . T.unpack . decodeUtf8 =<< moduleLLVMAssembly mdl
           
           optimiseModule datalayout (Just machine) (Just libinfo) mdl

@@ -63,7 +63,7 @@ import Unsafe.Coerce (unsafeCoerce)
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
 import Data.Array.Accelerate.LLVM.CodeGen.Exp (llvmOfFun1, intOfIndex, llvmOfFun2)
 import Data.Array.Accelerate.Trafo.Desugar (ArrayDescriptor(..))
-import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic ( when, ifThenElse, just, add, lt, mul, eq, fromJust, isJust )
+import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic ( when, ifThenElse, just, add, lt, mul, eq, fromJust, isJust, liftInt )
 import Data.Array.Accelerate.Analysis.Match (matchShapeR)
 import Data.Array.Accelerate.Trafo.Exp.Substitution (compose)
 import Data.Array.Accelerate.AST.Operation (groundToExpVar, Fun, mapArgs)
@@ -85,6 +85,7 @@ import qualified Debug.Trace
 import Formatting.ShortFormatters (o)
 import Data.Array.Accelerate (SLVOperation)
 import Data.Array.Accelerate.Backend (SLVOperation(..))
+import Data.Array.Accelerate.LLVM.CodeGen.IR
 
 
 
@@ -96,16 +97,34 @@ codegen :: ShortByteString
         -> LLVM Native (Module (KernelType env))
 codegen name env (Clustered c b) args = 
   codeGenFunction name (LLVM.Lam argTp "arg") $ do
+    -- putchar $ liftInt 73
     extractEnv
-    workstealLoop workstealIndex workstealActiveThreads (op scalarTypeInt32 $ constant (TupRsingle scalarTypeInt32) 1) $ \_ -> do
-      let b' = mapArgs BCAJA b
-      (acc, loopsize') <- execStateT (evalCluster (toOnlyAcc c) b' args gamma ()) (mempty, LS ShapeRz OP_Unit)
-      body acc loopsize'
-      retval_ $ boolean True
+    -- putchar $ liftInt 74
+    -- workstealLoop workstealIndex workstealActiveThreads (op scalarTypeInt32 $ constant (TupRsingle scalarTypeInt32) 1) $ \_ -> do
+    let b' = mapArgs BCAJA b
+    (acc, loopsize) <- execStateT (evalCluster (toOnlyAcc c) b' args gamma ()) (mempty, LS ShapeRz OP_Unit)
+    -- body acc loopsize'
+    acc' <- operandsMapToPairs acc $ \(accTypeR, toOp, fromOp) -> fmap fromOp $ flip execStateT (toOp acc) $ case loopsize of
+      LS loopshr loopsh -> 
+        workstealChunked loopshr workstealIndex workstealActiveThreads (flipShape loopshr loopsh) accTypeR (body loopshr toOp fromOp)
+    pure ()
     where
+      ba = makeBackendArg @NativeOp args gamma c b
       (argTp, extractEnv, workstealIndex, workstealActiveThreads, gamma) = bindHeaderEnv env
-      body :: Accumulated -> Loopsizes -> CodeGen Native ()
-      body initialAcc partialLoopSize =
+      body :: ShapeR sh -> (Accumulated -> a) -> (a -> Accumulated) -> LoopWork sh (StateT a (CodeGen Native))
+      body ShapeRz _ _ = LoopWorkZ
+      body (ShapeRsnoc shr) toOp fromOp = LoopWorkSnoc (body shr toOp fromOp) (\i is -> StateT $ \op -> second toOp <$> runStateT (foo i is) (fromOp op))
+        where
+      foo :: Operands Int -> [Operands Int] -> StateT Accumulated (CodeGen Native) ()
+      foo linix ixs = do
+        let d = length ixs -- TODO check: this or its inverse (i.e. totalDepth - length ixs)?
+        let i = (d, linix, ixs)
+        newInputs <- readInputs @_ @_ @NativeOp i args ba gamma
+        outputs <- evalOps @NativeOp i c newInputs args gamma
+        writeOutputs @_ @_ @NativeOp i args outputs gamma
+
+      body' :: Accumulated -> Loopsizes -> CodeGen Native ()
+      body' initialAcc partialLoopSize =
         case partialLoopSize of -- used to combine with loopSize here, but I think we can do everything in the static analysis?
           LS shr' sh' ->
             let go :: ShapeR sh -> Operands sh -> (Int, Operands Int, [Operands Int]) -> StateT Accumulated (CodeGen Native) ()
@@ -144,6 +163,19 @@ codegen name env (Clustered c b) args =
                               (\(OP_Pair i l) -> OP_Pair <$> add numType (constant typerInt 1) i <*> add numType (constant typerInt 1) l)
                               (\(OP_Pair i l) -> fmap (toR . snd) . runStateT (body (d, l, i:outerI)) . fromR)
 
+
+flipShape :: forall sh. ShapeR sh -> Operands sh -> Operands sh
+flipShape shr = multidim shr . reverse . multidim' shr
+
+multidim :: ShapeR sh -> [Operands Int] -> Operands sh
+multidim ShapeRz [] = OP_Unit
+multidim (ShapeRsnoc shr) (i:is) = OP_Pair (multidim shr is) i
+multidim _ _ = error "shouldn't have trusted me"
+
+multidim' :: ShapeR sh -> Operands sh -> [Operands Int]
+multidim' ShapeRz OP_Unit = []
+multidim' (ShapeRsnoc shr) (OP_Pair sh i) = i : multidim' shr sh
+
 -- We use some unsafe coerces in the context of the accumulators. 
 -- Some, in this function, are very local. Others, like in evalOp, 
 -- just deal with the assumption that the specific operand stored at index l indeed belongs to operation l.
@@ -177,13 +209,7 @@ operandsMapToPairs acc k
 --   ShapeMinus sh () = sh
 --   ShapeMinus (sh, Int) (sh', Int) = ShapeMinus sh sh'
 
-firstOrZero :: ShapeR sh -> Operands sh -> Operands Int
-firstOrZero ShapeRz _ = constant typerInt 0
-firstOrZero ShapeRsnoc{} (OP_Pair _ i) = i
 
-
-flipShape :: forall sh. ShapeR sh -> Operands sh -> Operands sh
-flipShape shr = multidim shr . reverse . multidim' shr
 
 -- TODO: we need to only consider each _in-order_ vertical argument
 -- TODO: we ignore backpermute currently. Could use this function to check the outputs and vertical, and the staticclusteranalysis evalI for the inputs.
@@ -218,6 +244,9 @@ instance EvalOp NativeOp where
   type Embed' NativeOp = Compose Maybe Operands
   type EnvF NativeOp = GroundOperand
 
+  embed (GroundOperandParam  x) = Compose $ Just $ ir' x
+  embed (GroundOperandBuffer x) = error "does this ever happen?"
+
   unit = Compose $ Just OP_Unit
 
   -- don't need to be in the monad!
@@ -249,6 +278,16 @@ instance EvalOp NativeOp where
       i <- intOfIndex shr2 sh' sh2
       readBuffer tp TypeInt (aprjBuffer (unsafeCoerce buf) gamma) (op TypeInt i)
     | otherwise = pure CN
+  readInput tp _ (TupRsingle buf) gamma a (_,i,_) = -- assuming no bp, and I'll just make a read at every depth?
+    -- lift $ CJ . ir tp <$> readBuffer tp TypeInt (aprjBuffer (unsafeCoerce buf) gamma) (op TypeInt i)
+    -- second attempt, the above segfaults: never read instead
+    pure CN
+    -- also segfaults :(
+    {- weird: this implies that a is a `IsUnit`, but it happens on Int
+    error $ show tp <> case buf of
+    TupRsingle _ -> "single"
+    TupRpair _ _ -> "pair"
+    TupRunit -> "unit" -}
   readInput _ _ _ _ _ _ = error "not single"
 
   evalOp  :: (Int, Operands Int, [Operands Int])
@@ -331,14 +370,6 @@ instance EvalOp NativeOp where
     | otherwise = pure $ Push Env.Empty $ FromArg (Value' CN (Shape' shr' (CJ sh')))
   evalOp _ _ _ _ _ = error "unmatched pattern?"
 
-multidim :: ShapeR sh -> [Operands Int] -> Operands sh
-multidim ShapeRz [] = OP_Unit
-multidim (ShapeRsnoc shr) (i:is) = OP_Pair (multidim shr is) i
-multidim _ _ = error "shouldn't have trusted me"
-
-multidim' :: ShapeR sh -> Operands sh -> [Operands Int]
-multidim' ShapeRz OP_Unit = []
-multidim' (ShapeRsnoc shr) (OP_Pair sh i) = i : multidim' shr sh
 
 instance TupRmonoid Operands where
   pair' = OP_Pair
@@ -419,6 +450,7 @@ instance EvalOp (JustAccumulator NativeOp) where
   subtup (SubTupRpair a b) (TupRpair x y) = TupRpair (subtup @(JustAccumulator NativeOp) a x) (subtup @(JustAccumulator NativeOp) b y)
   subtup _ _ = error "subtup-pair with non-pair TypeR"
 
+  readInput ty sh _ gamma (BCA2JA IsUnit) _ = pure TupRunit
   readInput ty sh _ gamma (BCA2JA (BCAN2 Nothing  d)) _ = StateT $ \(acc,ls) -> pure (TupRsingle ty, (acc, merge ls sh gamma))
   readInput ty sh _ gamma (BCA2JA (BCAN2 (Just (BP _ _ _ ls')) d)) _ = StateT $ \(acc,ls) -> pure (TupRsingle ty, (acc, merge ls ls' gamma))
 
@@ -477,11 +509,11 @@ instance (StaticClusterAnalysis op, EnvF (JustAccumulator op) ~ EnvF op) => Stat
   varToValue   x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ varToValue $ coerce x
   varToSh      x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ varToSh $ coerce x
   shToVar      x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ shToVar $ coerce x
-  shrinkOrGrow x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ shrinkOrGrow $ coerce x
+  shrinkOrGrow a b x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ shrinkOrGrow a b $ coerce x
   addTup       x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ addTup $ coerce x
   unitToVar    x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ unitToVar $ coerce x
   varToUnit    x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ varToUnit $ coerce x
-  pairinfo x y = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ pairinfo (coerce x) (coerce y)
+  pairinfo a x y = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ pairinfo a (coerce x) (coerce y)
 
 deriving instance (Eq (BackendClusterArg2 op x y)) => Eq (BackendClusterArg2 (JustAccumulator op) x y)
 deriving instance (Show (BackendClusterArg2 op x y)) => Show (BackendClusterArg2 (JustAccumulator op) x y)
@@ -515,8 +547,6 @@ isAtDepth vs x = x == depth vs
 isAtDepth' :: ShapeR sh -> Int -> Bool
 isAtDepth' vs x = x == rank vs
 
-typerInt :: TypeR Int
-typerInt = TupRsingle scalarTypeInt
 
 zeroes :: TypeR a -> Operands a
 zeroes TupRunit = OP_Unit
