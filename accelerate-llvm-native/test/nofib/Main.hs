@@ -32,20 +32,22 @@ import Control.Concurrent
 -- import Quickhull
 main :: IO ()
 main = do
-  let xs = fromList (Z :. 5 :. 7) [1 :: Int ..]
-  -- let ys = map (+1) $ 
-  --           use xs
-  -- let f = map (*2)
-  -- let program = awhile (map (A.>0) . asnd) (\(T2 a b) -> T2 (f a) (map (\x -> x - 1) b)) (T2 ys $ unit $ constant (100000 :: Int))
+  let xs = fromList (Z :. 5) [1 :: Int ..]
+  let ys = map (+1) $ 
+            use xs
+  let f = map (*2)
+  let program = awhile (map (A.>0) . asnd) (\(T2 a b) -> T2 (f a) (map (\x -> x - 1) b)) (T2 ys $ unit $ constant (100000 :: Int))
 
-  putStrLn "scan:"
-  let f = 
-        --map (*2) $ 
-        scanl1 (+) $
-        --map (+4) $ 
-        use xs
-  putStrLn $ test @UniformScheduleFun @NativeKernel f
-  print $ run @Native f
+  -- putStrLn "scan:"
+  -- let f = 
+  --       --map (*2) $ 
+  --       scanl1 (+) $
+  --       --map (+4) $ 
+  --       use xs
+  -- putStrLn $ test @UniformScheduleFun @NativeKernel f
+  -- print $ run @Native f
+
+  -- putStrLn $ test @UniformScheduleFun @NativeKernel $ map (\(I2 a b)->b) (generate (I2 10 5) (\(I2 i j) -> fromIndex (I2 (5 :: Exp Int) (10 :: Exp Int)) (toIndex (I2 10 5) (I2 i j))))
 
   -- threadDelay 5000000
   -- putStrLn "done"
@@ -83,10 +85,10 @@ main = do
   -- print $ runN @Native f xs
   -- print $ runN @Native (f ys)
 
-  -- putStrLn "fold:"
-  -- let f = fold1 (+) ys
-  -- -- putStrLn $ test @UniformScheduleFun @NativeKernel f
-  -- print $ run @Native f
+  putStrLn "fold:"
+  let f = fold1 (+) ys
+  putStrLn $ test @UniformScheduleFun @NativeKernel f
+  print $ run @Native f
 
   -- putStrLn "scan:"
   -- let f = scanl1 (+) ys

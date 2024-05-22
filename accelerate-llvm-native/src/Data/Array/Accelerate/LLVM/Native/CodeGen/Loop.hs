@@ -80,10 +80,12 @@ imapNestFromTo shr start end extent body =
       $ \sz      -> imapFromTo ssz esz
       $ \i       -> k (OP_Pair sz i)
 
-loopWorkFromTo :: ShapeR sh -> Operands sh -> Operands sh -> Operands sh -> TypeR s -> LoopWork sh (StateT (Operands s) (CodeGen Native)) -> StateT (Operands s) (CodeGen Native) ()
-loopWorkFromTo shr start end extent tys loopwork = do
+loopWorkFromTo :: ShapeR sh -> Operands sh -> Operands sh -> Operands sh -> TypeR s -> (LoopWork sh (StateT (Operands s) (CodeGen Native)),StateT (Operands s) (CodeGen Native) ()) -> StateT (Operands s) (CodeGen Native) ()
+loopWorkFromTo shr start end extent tys (loopwork,finish) = do
   linix <- lift (intOfIndex shr extent start)
   loopWorkFromTo' shr start end extent linix [] tys loopwork
+  finish
+
 
 loopWorkFromTo' :: ShapeR sh -> Operands sh -> Operands sh -> Operands sh -> Operands Int -> [Operands Int] -> TypeR s -> LoopWork sh (StateT (Operands s) (CodeGen Native)) -> StateT (Operands s) (CodeGen Native) ()
 loopWorkFromTo' ShapeRz OP_Unit OP_Unit OP_Unit _ _ _ LoopWorkZ = pure ()
@@ -272,7 +274,7 @@ workstealLoop counter activeThreads size doWork = do
   -- lift $ setBlock dummy -- without this, the previous block always returns True for some reason
   
 
-workstealChunked :: ShapeR sh -> Operand (Ptr Int32) -> Operand (Ptr Int32) -> Operands sh -> TypeR s -> LoopWork sh (StateT (Operands s) (CodeGen Native)) -> StateT (Operands s) (CodeGen Native) ()
+workstealChunked :: ShapeR sh -> Operand (Ptr Int32) -> Operand (Ptr Int32) -> Operands sh -> TypeR s -> (LoopWork sh (StateT (Operands s) (CodeGen Native)), StateT (Operands s) (CodeGen Native) ()) -> StateT (Operands s) (CodeGen Native) ()
 workstealChunked shr counter activeThreads sh tys loopwork = do
   let chunkSz = chunkSize' shr sh
   chunkCounts <- lift $ chunkCount shr sh chunkSz

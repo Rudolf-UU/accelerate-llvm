@@ -299,11 +299,9 @@ instance MakesILP NativeOp where
 
   encodeBackendClusterArg (BCAN i) = intHost $(hashQ ("BCAN" :: String)) <> intHost i
 
-inputConstraints :: HasCallStack => Label -> Labels -> Constraint NativeOp
+inputConstraints :: Label -> Labels -> Constraint NativeOp
 inputConstraints l = foldMap $ \lIn -> 
-                timesN (fused lIn l) .>=. ILP.c (InDir  l) .-. ILP.c (OutDir  lIn)
-    <> (-1) .*. timesN (fused lIn l) .<=. ILP.c (InDir  l) .-. ILP.c (OutDir  lIn)
-    <>          timesN (fused lIn l) .>=. ILP.c (InDims l) .-. ILP.c (OutDims lIn)
+                timesN (fused lIn l) .>=. ILP.c (InDims l) .-. ILP.c (OutDims lIn)
     <> (-1) .*. timesN (fused lIn l) .<=. ILP.c (InDims l) .-. ILP.c (OutDims lIn)
 
 inrankifmanifest :: ShapeR sh -> Label -> Constraint NativeOp
