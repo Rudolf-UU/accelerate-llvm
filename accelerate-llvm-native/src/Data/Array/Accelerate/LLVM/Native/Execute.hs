@@ -56,7 +56,7 @@ import Control.Concurrent.MVar
 import System.IO
 
 -- change for debugging schedule execution
-don't :: IO a -> IO ()
+don't :: IO () -> IO ()
 don't f = return ()
 
 

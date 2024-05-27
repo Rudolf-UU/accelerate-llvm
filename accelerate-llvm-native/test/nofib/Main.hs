@@ -32,11 +32,54 @@ import Control.Concurrent
 -- import Quickhull
 main :: IO ()
 main = do
-  let xs = fromList (Z :. 5) [1 :: Int ..]
-  let ys = map (+1) $ 
-            use xs
-  let f = map (*2)
-  let program = awhile (map (A.>0) . asnd) (\(T2 a b) -> T2 (f a) (map (\x -> x - 1) b)) (T2 ys $ unit $ constant (100000 :: Int))
+  -- let xs = fromList (Z :. 5 :. 10) [1 :: Int ..]
+  -- let ys = map (+1) $ 
+  --           use xs
+  -- let f = map (*2)
+  -- let program = awhile (map (A.>0) . asnd) (\(T2 a b) -> T2 (f a) (map (\x -> x - 1) b)) (T2 ys $ unit $ constant (100000 :: Int))
+
+  -- putStrLn "generate"
+  -- let zs = generate (Z_ ::. 256 ::. 256) $ \idx -> if Prelude.foldl1 (||) $ Prelude.map (== idx) [I2 (constant a) (constant b) | a <- [205..209], b <- [200..210]] 
+  --           then 1 
+  --           else if Prelude.foldl1 (||) $ Prelude.map (== idx) [I2 (constant a) (constant b) | a <- [250..259], b <- [250..260]]
+  --                   then -1
+  --                   else 0 :: Exp Double
+
+  -- putStrLn $ test @UniformScheduleFun @NativeKernel zs
+  -- print $ run @Native zs
+
+  -- let negatives = [
+  --       I3 211 154 98,
+  --       I3 102 138 112,
+  --       I3 101 156 59,
+  --       I3 17 205 32,
+  --       I3 92 63 205,
+  --       I3 199 7 203,
+  --       I3 250 170 157,
+  --       I3 82 184 255,
+  --       I3 154 162 36,
+  --       I3 223 42 240]
+  --     positives = [
+  --       I3 57 120 167,
+  --       I3 5 118 175,
+  --       I3 176 246 164,
+  --       I3 45 194 234,
+  --       I3 212 7 248,
+  --       I3 115 123 207,
+  --       I3 202 83 209,
+  --       I3 203 18 198,
+  --       I3 243 172 14,
+  --       I3 54 209 40]
+
+  let zs = generate (Z_ ::. constant 15 ::. constant 15 ::. constant 11) $ \(I3 x y z) -> T3 x y z
+              -- cond (Prelude.foldl1 (||) $ Prelude.map (== idx) negatives)
+              --   (-1)
+              --   $ cond (Prelude.foldl1 (||) $ Prelude.map (==idx) positives)
+              --     1
+                  -- 0 :: Exp Double
+  -- let zs' = zs $ use $ fromList Z [11 :: Int]
+  putStrLn $ test @UniformScheduleFun @NativeKernel zs
+  print $ run @Native zs
 
   -- putStrLn "scan:"
   -- let f = 
@@ -85,10 +128,15 @@ main = do
   -- print $ runN @Native f xs
   -- print $ runN @Native (f ys)
 
-  putStrLn "fold:"
-  let f = fold1 (+) ys
-  putStrLn $ test @UniformScheduleFun @NativeKernel f
-  print $ run @Native f
+  -- putStrLn "fold:"
+  -- let f = fold1 (+) ys
+  -- putStrLn $ test @UniformScheduleFun @NativeKernel f
+  -- print $ run @Native f
+
+  -- putStrLn "stencil:"
+  -- let f = stencil (\(a :: Exp Int,b,c) -> a+b+c) mirror ys
+  -- putStrLn $ test @UniformScheduleFun @NativeKernel f
+  -- print $ run @Native f
 
   -- putStrLn "scan:"
   -- let f = scanl1 (+) ys

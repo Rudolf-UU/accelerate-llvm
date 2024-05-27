@@ -285,6 +285,7 @@ instance MakesILP NativeOp where
       (    inputConstraints l lIns
         <> ILP.c (InDir  l) .==. ILP.c (OutDir l)
         <> ILP.c (InDims l) .==. int 1 .+. ILP.c (OutDims l)
+        <> foldMap (\lin -> fused lin l .==. int 1) lIns
         <> inrankifmanifest (ShapeRsnoc shr) l)
       (defaultBounds l)
 

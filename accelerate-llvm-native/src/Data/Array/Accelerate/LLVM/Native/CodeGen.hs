@@ -166,17 +166,7 @@ codegen name env (Clustered c b) args =
                               (\(OP_Pair i l) -> fmap (toR . snd) . runStateT (body (d, l, i:outerI)) . fromR)
 
 
-flipShape :: forall sh. ShapeR sh -> Operands sh -> Operands sh
-flipShape shr = multidim shr . reverse . multidim' shr
 
-multidim :: ShapeR sh -> [Operands Int] -> Operands sh
-multidim ShapeRz [] = OP_Unit
-multidim (ShapeRsnoc shr) (i:is) = OP_Pair (multidim shr is) i
-multidim _ _ = error "shouldn't have trusted me"
-
-multidim' :: ShapeR sh -> Operands sh -> [Operands Int]
-multidim' ShapeRz OP_Unit = []
-multidim' (ShapeRsnoc shr) (OP_Pair sh i) = i : multidim' shr sh
 
 -- We use some unsafe coerces in the context of the accumulators. 
 -- Some, in this function, are very local. Others, like in evalOp, 
@@ -280,10 +270,11 @@ instance EvalOp NativeOp where
       i <- intOfIndex shr2 sh' sh2
       readBuffer tp TypeInt (aprjBuffer (unsafeCoerce buf) gamma) (op TypeInt i)
     | otherwise = pure CN
-  readInput tp _ (TupRsingle buf) gamma a (_,i,_) = -- assuming no bp, and I'll just make a read at every depth?
+  readInput tp _ (TupRsingle buf) gamma a (_,i,_) = error "here"
+  -- assuming no bp, and I'll just make a read at every depth?
     -- lift $ CJ . ir tp <$> readBuffer tp TypeInt (aprjBuffer (unsafeCoerce buf) gamma) (op TypeInt i)
     -- second attempt, the above segfaults: never read instead
-    pure CN
+    -- pure CN
     -- also segfaults :(
     {- weird: this implies that a is a `IsUnit`, but it happens on Int
     error $ show tp <> case buf of

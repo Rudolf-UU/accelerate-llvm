@@ -82,25 +82,29 @@ imapNestFromTo shr start end extent body =
 
 loopWorkFromTo :: ShapeR sh -> Operands sh -> Operands sh -> Operands sh -> TypeR s -> (LoopWork sh (StateT (Operands s) (CodeGen Native)),StateT (Operands s) (CodeGen Native) ()) -> StateT (Operands s) (CodeGen Native) ()
 loopWorkFromTo shr start end extent tys (loopwork,finish) = do
-  linix <- lift (intOfIndex shr extent start)
+  -- linix <- lift (intOfIndex shr (flipShape shr extent) (flipShape shr start))
+  let linix = liftInt 0
   loopWorkFromTo' shr start end extent linix [] tys loopwork
   finish
 
 
 loopWorkFromTo' :: ShapeR sh -> Operands sh -> Operands sh -> Operands sh -> Operands Int -> [Operands Int] -> TypeR s -> LoopWork sh (StateT (Operands s) (CodeGen Native)) -> StateT (Operands s) (CodeGen Native) ()
 loopWorkFromTo' ShapeRz OP_Unit OP_Unit OP_Unit _ _ _ LoopWorkZ = pure ()
-loopWorkFromTo' (ShapeRsnoc shr) (OP_Pair start' start) (OP_Pair end' end) (OP_Pair extent' _) linix ixs tys (LoopWorkSnoc lw foo) = do
+loopWorkFromTo' (ShapeRsnoc shr) (OP_Pair start' start) (OP_Pair end' end) (OP_Pair extent' _) linixprev ixs tys (LoopWorkSnoc lw foo) = do
+  linix <- lift $ add numType start linixprev
   StateT $ \s -> ((),) <$> Loop.iter
     (TupRpair typerInt typerInt)
     tys
     (OP_Pair start linix)
     s
-    (\(OP_Pair i _) -> lt singleType i end)
+    (\(OP_Pair i _) -> lt singleType i end
+    )
     (\(OP_Pair i l) -> OP_Pair <$> add numType (constant typerInt 1) i <*> add numType (constant typerInt 1) l)
     (\(OP_Pair i l) -> execStateT $ do
-                        recurlinix <- lift $ mul numType l $ firstOrZero shr extent'
+                        recurlinix <- lift $ mul numType l $ firstOrZero shr extent' -- if extent' is empty, this won't be used anyway
                         loopWorkFromTo' shr start' end' extent' recurlinix (i:ixs) tys lw
-                        foo l (i : ixs))
+                        foo l (i : ixs)
+                        )
 
                 
 firstOrZero :: ShapeR sh -> Operands sh -> Operands Int
@@ -381,6 +385,18 @@ data LoopWork sh m where
                -> LoopWork (sh, Int) m
 
 
+flipShape :: forall sh. ShapeR sh -> Operands sh -> Operands sh
+flipShape shr = multidim shr . reverse . multidim' shr
+
+
+multidim :: ShapeR sh -> [Operands Int] -> Operands sh
+multidim ShapeRz [] = OP_Unit
+multidim (ShapeRsnoc shr) (i:is) = OP_Pair (multidim shr is) i
+multidim _ _ = error "shouldn't have trusted me"
+
+multidim' :: ShapeR sh -> Operands sh -> [Operands Int]
+multidim' ShapeRz OP_Unit = []
+multidim' (ShapeRsnoc shr) (OP_Pair sh i) = i : multidim' shr sh
 
 ---- debugging tools ----
 putchar :: Operands Int -> CodeGen Native (Operands Int)
